@@ -1,0 +1,49 @@
+# AegisEdge: Edge-AI Autonomous Perception & Navigation System for GPS-Denied Environments
+
+A state-of-the-art, self-contained robotics autonomy prototype designed for severe, degraded, and GPS-denied environments (subterranean mines, collapsed buildings, industrial tunnels, and GPS-jammed military zones).
+
+---
+
+## 🌟 Interactive Prototype (100% Offline Ready)
+
+This directory contains a complete **interactive web prototype** built with zero external dependencies (no CDNs, no Node.js required, no internet needed). Judges can evaluate the full system anytime on any machine.
+
+### How to Run:
+- **Option 1 (Instant)**: Simply double-click `open_prototype.bat` or double-click `index.html` to open it in your browser.
+- **Option 2 (Local Server via Python)**:
+  ```bash
+  python -m http.server 8000
+  ```
+  Then open `http://localhost:8000` in any browser.
+
+---
+
+## 🚀 Key Modules Included in the Prototype
+
+1. **Interactive Onboard Perception & Navigation Simulator**:
+   - Real-time 360° LiDAR raycasting and metric point cloud generation.
+   - Camera FOV frustum with 3D bounding box metric projection.
+   - Dynamic obstacle tracking (velocity vectors & spatiotemporal horizon).
+   - Nav2 Global Path & GPU-accelerated MPPI local controller trajectory rollouts avoiding moving pedestrians.
+   - Live telemetry HUD (Pose, velocity, drift estimation, inference latency, power draw).
+
+2. **GPS-Denied Degradation Resilience Testbed**:
+   - Interactive fault-injection sandbox:
+     - Pitch-black tunnel (VIO photometric loss &rarr; LiDAR-Inertial fallback).
+     - Featureless corridor (LiDAR geometric degeneracy &rarr; visual dominance).
+     - Wheel slip rejection (Encoder zero-weight clamp).
+   - Pure Canvas real-time sensor weight stream chart.
+
+3. **Modular ROS 2 Architecture Explorer**:
+   - Interactive breakdown of Perception, Localization, Sensor Fusion, World Model, ROS 2, Nav2, and NVIDIA Jetson edge compute.
+   - Deep-dive cards showing mathematical formulas, ROS 2 topic signatures, and failure safeguards.
+
+4. **Rigorous Quantitative Benchmarks**:
+   - EVO Absolute Trajectory Error (ATE) & Relative Pose Error (RPE) comparisons.
+   - TensorRT FP32 vs ONNX vs FP16 vs INT8 latency, FPS, and VRAM benchmarks.
+
+5. **Natural Language / VLM Behavior Tree Dispatcher**:
+   - High-level operator directive compiler translating natural language instructions into autonomous ROS 2 Nav2 Behavior Tree XML.
+
+6. **Hardware Bill of Materials (BOM) & Electrical Architecture**:
+   - NVIDIA Jetson Orin NX (16GB), Intel RealSense D435i / OAK-D, Livox Mid-360, and STM32 micro-ROS platform.

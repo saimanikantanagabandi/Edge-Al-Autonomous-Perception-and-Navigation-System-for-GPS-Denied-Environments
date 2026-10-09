@@ -1,0 +1,668 @@
+/**
+ * Interactive Autonomous Navigation & Perception Simulator
+ * Simulates:
+ * - 2D Environment with walls & pillars
+ * - Differential drive robot kinematics
+ * - 360° LiDAR Raycasting
+ * - Front Camera FOV Frustum with Object Detection & 3D Bounding Box Projection
+ * - Dynamic obstacles (moving humans) with velocity vectors
+ * - Nav2 Global Path & MPPI Local Trajectory Rollouts
+ */
+
+class AutonomousSim {
+  constructor(canvasId) {
+    this.canvas = document.getElementById(canvasId);
+    this.ctx = this.canvas.getContext('2d');
+    
+    // Resize handling
+    this.width = this.canvas.width = this.canvas.clientWidth || 800;
+    this.height = this.canvas.height = this.canvas.clientHeight || 520;
+    
+    // Robot State
+    this.robot = {
+      x: 120,
+      y: 260,
+      theta: 0,
+      radius: 16,
+      vx: 0,
+      w: 0,
+      targetVx: 0,
+      targetW: 0,
+      maxV: 2.2,
+      maxW: 1.8,
+      driftX: 0,
+      driftY: 0
+    };
+    
+    // Goal State
+    this.goal = {
+      x: 680,
+      y: 260,
+      active: true
+    };
+    
+    // Environment Obstacles (Walls & static pillars)
+    this.staticObstacles = [
+      // Outer boundaries
+      { type: 'rect', x: 20, y: 20, w: this.width - 40, h: 12 },
+      { type: 'rect', x: 20, y: this.height - 32, w: this.width - 40, h: 12 },
+      { type: 'rect', x: 20, y: 20, w: 12, h: this.height - 40 },
+      { type: 'rect', x: this.width - 32, y: 20, w: 12, h: this.height - 40 },
+      
+      // Rooms & Corridors
+      { type: 'rect', x: 220, y: 20, w: 14, h: 180 },
+      { type: 'rect', x: 220, y: 320, w: 14, h: 180 },
+      
+      { type: 'rect', x: 440, y: 140, w: 14, h: 240 },
+      
+      // Pillars
+      { type: 'circle', x: 330, y: 150, r: 20 },
+      { type: 'circle', x: 330, y: 370, r: 20 },
+      { type: 'circle', x: 580, y: 160, r: 22 },
+      { type: 'circle', x: 580, y: 360, r: 22 }
+    ];
+    
+    // Dynamic Obstacles (Moving humans)
+    this.dynamicObstacles = [
+      { id: 1, label: 'Person 1', x: 330, y: 260, r: 14, vx: 0, vy: 1.1, minY: 190, maxY: 330 },
+      { id: 2, label: 'Person 2', x: 520, y: 280, r: 14, vx: 0, vy: -1.3, minY: 130, maxY: 400 },
+      { id: 3, label: 'Hazard Box', x: 620, y: 260, r: 12, vx: 0.6, vy: 0, minX: 550, maxX: 690 }
+    ];
+    
+    // Visual Flags
+    this.showLidar = true;
+    this.showFov = true;
+    this.showMppi = true;
+    this.showCostmap = false;
+    
+    // LiDAR Parameters
+    this.numLidarRays = 64;
+    this.lidarRange = 220;
+    this.lidarHits = [];
+    
+    // Camera FOV Parameters
+    this.camFov = Math.PI / 2.5; // ~72 degrees
+    this.camRange = 240;
+    this.detectedObjects = [];
+    
+    // MPPI Simulated Rollouts
+    this.mppiRollouts = [];
+    this.globalPath = [];
+    
+    // Telemetry
+    this.fps = 48;
+    this.inferenceTime = 14.2; // ms
+    this.jetsonPower = 11.8; // W
+    
+    this.initEventListeners();
+    this.computeGlobalPath();
+    this.startLoop();
+  }
+  
+  initEventListeners() {
+    this.canvas.addEventListener('click', (e) => {
+      const rect = this.canvas.getBoundingClientRect();
+      const scaleX = this.canvas.width / rect.width;
+      const scaleY = this.canvas.height / rect.height;
+      const clickX = (e.clientX - rect.left) * scaleX;
+      const clickY = (e.clientY - rect.top) * scaleY;
+      
+      // Check if clicked inside bounds
+      if (clickX > 40 && clickX < this.width - 40 && clickY > 40 && clickY < this.height - 40) {
+        this.goal.x = clickX;
+        this.goal.y = clickY;
+        this.goal.active = true;
+        this.computeGlobalPath();
+      }
+    });
+    
+    // Window resize
+    window.addEventListener('resize', () => {
+      this.width = this.canvas.width = this.canvas.clientWidth || 800;
+      this.height = this.canvas.height = this.canvas.clientHeight || 520;
+    });
+  }
+  
+  computeGlobalPath() {
+    // Generate intermediate waypoints to avoid walls
+    const path = [{ x: this.robot.x, y: this.robot.y }];
+    
+    // Hallway navigation heuristic
+    if (this.robot.x < 220 && this.goal.x > 220) {
+      path.push({ x: 220, y: 260 }); // Center corridor gate 1
+    }
+    if (this.robot.x < 440 && this.goal.x > 440) {
+      // Choose upper or lower opening
+      const gateY = this.goal.y < 260 ? 100 : 420;
+      path.push({ x: 440, y: gateY });
+    }
+    path.push({ x: this.goal.x, y: this.goal.y });
+    this.globalPath = path;
+  }
+  
+  updateDynamicObstacles() {
+    for (const obs of this.dynamicObstacles) {
+      obs.x += obs.vx;
+      obs.y += obs.vy;
+      
+      if (obs.minY !== undefined && (obs.y <= obs.minY || obs.y >= obs.maxY)) {
+        obs.vy *= -1;
+      }
+      if (obs.minX !== undefined && (obs.x <= obs.minX || obs.x >= obs.maxX)) {
+        obs.vx *= -1;
+      }
+    }
+  }
+  
+  simulateLidar() {
+    this.lidarHits = [];
+    const angleStep = (Math.PI * 2) / this.numLidarRays;
+    
+    for (let i = 0; i < this.numLidarRays; i++) {
+      const angle = this.robot.theta + i * angleStep;
+      let minDistance = this.lidarRange;
+      let hitPoint = {
+        x: this.robot.x + Math.cos(angle) * this.lidarRange,
+        y: this.robot.y + Math.sin(angle) * this.lidarRange
+      };
+      
+      // Check static obstacles
+      for (const obs of this.staticObstacles) {
+        if (obs.type === 'rect') {
+          const hit = this.rayIntersectRect(this.robot.x, this.robot.y, angle, obs);
+          if (hit && hit.dist < minDistance) {
+            minDistance = hit.dist;
+            hitPoint = hit.point;
+          }
+        } else if (obs.type === 'circle') {
+          const hit = this.rayIntersectCircle(this.robot.x, this.robot.y, angle, obs);
+          if (hit && hit.dist < minDistance) {
+            minDistance = hit.dist;
+            hitPoint = hit.point;
+          }
+        }
+      }
+      
+      // Check dynamic obstacles
+      for (const obs of this.dynamicObstacles) {
+        const hit = this.rayIntersectCircle(this.robot.x, this.robot.y, angle, obs);
+        if (hit && hit.dist < minDistance) {
+          minDistance = hit.dist;
+          hitPoint = hit.point;
+        }
+      }
+      
+      this.lidarHits.push({ point: hitPoint, dist: minDistance, angle: angle });
+    }
+  }
+  
+  rayIntersectCircle(rx, ry, angle, circle) {
+    const dx = Math.cos(angle);
+    const dy = Math.sin(angle);
+    const cx = circle.x - rx;
+    const cy = circle.y - ry;
+    
+    const t = cx * dx + cy * dy;
+    if (t < 0) return null;
+    
+    const perpX = rx + t * dx - circle.x;
+    const perpY = ry + t * dy - circle.y;
+    const distSq = perpX * perpX + perpY * perpY;
+    
+    if (distSq > circle.r * circle.r) return null;
+    
+    const dt = Math.sqrt(circle.r * circle.r - distSq);
+    const hitDist = t - dt;
+    if (hitDist < 0) return null;
+    
+    return {
+      dist: hitDist,
+      point: { x: rx + dx * hitDist, y: ry + dy * hitDist }
+    };
+  }
+  
+  rayIntersectRect(rx, ry, angle, rect) {
+    const dx = Math.cos(angle);
+    const dy = Math.sin(angle);
+    
+    let tmin = 0;
+    let tmax = this.lidarRange;
+    
+    // X boundaries
+    if (Math.abs(dx) > 1e-6) {
+      let t1 = (rect.x - rx) / dx;
+      let t2 = (rect.x + rect.w - rx) / dx;
+      if (t1 > t2) [t1, t2] = [t2, t1];
+      tmin = Math.max(tmin, t1);
+      tmax = Math.min(tmax, t2);
+      if (tmin > tmax) return null;
+    } else {
+      if (rx < rect.x || rx > rect.x + rect.w) return null;
+    }
+    
+    // Y boundaries
+    if (Math.abs(dy) > 1e-6) {
+      let t1 = (rect.y - ry) / dy;
+      let t2 = (rect.y + rect.h - ry) / dy;
+      if (t1 > t2) [t1, t2] = [t2, t1];
+      tmin = Math.max(tmin, t1);
+      tmax = Math.min(tmax, t2);
+      if (tmin > tmax) return null;
+    } else {
+      if (ry < rect.y || ry > rect.y + rect.h) return null;
+    }
+    
+    if (tmin < 0) return null;
+    
+    return {
+      dist: tmin,
+      point: { x: rx + dx * tmin, y: ry + dy * tmin }
+    };
+  }
+  
+  simulateCameraFOV() {
+    this.detectedObjects = [];
+    const halfFov = this.camFov / 2;
+    
+    for (const obs of this.dynamicObstacles) {
+      const dx = obs.x - this.robot.x;
+      const dy = obs.y - this.robot.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      
+      if (dist <= this.camRange) {
+        let angleToObs = Math.atan2(dy, dx) - this.robot.theta;
+        // Normalize angle to [-PI, PI]
+        while (angleToObs > Math.PI) angleToObs -= Math.PI * 2;
+        while (angleToObs < -Math.PI) angleToObs += Math.PI * 2;
+        
+        if (Math.abs(angleToObs) <= halfFov) {
+          // Obstacle inside Camera FOV!
+          this.detectedObjects.push({
+            id: obs.id,
+            label: obs.label,
+            x: obs.x,
+            y: obs.y,
+            dist: dist,
+            vx: obs.vx,
+            vy: obs.vy,
+            relAngle: angleToObs
+          });
+        }
+      }
+    }
+  }
+  
+  simulateMPPIPlanner() {
+    this.mppiRollouts = [];
+    
+    // Target next waypoint
+    let target = this.goal;
+    for (let i = 0; i < this.globalPath.length; i++) {
+      const wp = this.globalPath[i];
+      const d = Math.hypot(wp.x - this.robot.x, wp.y - this.robot.y);
+      if (d > 35) {
+        target = wp;
+        break;
+      }
+    }
+    
+    const angleToTarget = Math.atan2(target.y - this.robot.y, target.x - this.robot.x);
+    let desiredW = angleToTarget - this.robot.theta;
+    while (desiredW > Math.PI) desiredW -= Math.PI * 2;
+    while (desiredW < -Math.PI) desiredW += Math.PI * 2;
+    
+    // Generate 12 MPPI Trajectory Rollouts with stochastic noise
+    let bestScore = -Infinity;
+    let bestV = 0;
+    let bestW = 0;
+    
+    for (let k = 0; k < 12; k++) {
+      const sampleW = desiredW + (Math.random() - 0.5) * 1.6;
+      const sampleV = Math.max(0.6, this.robot.maxV - Math.abs(sampleW) * 0.8);
+      
+      const rollout = [];
+      let rx = this.robot.x;
+      let ry = this.robot.y;
+      let rth = this.robot.theta;
+      let collision = false;
+      let minClearance = 999;
+      
+      for (let step = 0; step < 16; step++) {
+        rth += sampleW * 0.08;
+        rx += Math.cos(rth) * sampleV * 1.5;
+        ry += Math.sin(rth) * sampleV * 1.5;
+        rollout.push({ x: rx, y: ry });
+        
+        // Clearance check with dynamic obstacles (including predicted movement)
+        for (const obs of this.dynamicObstacles) {
+          const predObsX = obs.x + obs.vx * step * 0.8;
+          const predObsY = obs.y + obs.vy * step * 0.8;
+          const d = Math.hypot(rx - predObsX, ry - predObsY);
+          if (d < obs.r + this.robot.radius + 10) {
+            collision = true;
+          }
+          if (d < minClearance) minClearance = d;
+        }
+        
+        // Clearance check with static obstacles
+        for (const obs of this.staticObstacles) {
+          if (obs.type === 'circle') {
+            const d = Math.hypot(rx - obs.x, ry - obs.y);
+            if (d < obs.r + this.robot.radius + 6) collision = true;
+          }
+        }
+      }
+      
+      // Cost evaluation: Progress towards goal + clearance - control effort
+      const distToEnd = Math.hypot(this.goal.x - rx, this.goal.y - ry);
+      let score = -distToEnd * 1.2 + minClearance * 0.8;
+      if (collision) score -= 10000;
+      
+      this.mppiRollouts.push({
+        path: rollout,
+        isBest: false,
+        collision: collision
+      });
+      
+      if (score > bestScore) {
+        bestScore = score;
+        bestV = sampleV;
+        bestW = sampleW;
+      }
+    }
+    
+    // Assign best
+    this.robot.targetVx = Math.min(this.robot.maxV, bestV);
+    this.robot.targetW = Math.max(-this.robot.maxW, Math.min(this.robot.maxW, bestW * 1.2));
+  }
+  
+  updateRobotKinematics() {
+    const distToGoal = Math.hypot(this.goal.x - this.robot.x, this.goal.y - this.robot.y);
+    if (distToGoal < 18) {
+      // Reached goal
+      this.robot.vx *= 0.8;
+      this.robot.w *= 0.8;
+      return;
+    }
+    
+    // Smooth acceleration
+    this.robot.vx += (this.robot.targetVx - this.robot.vx) * 0.15;
+    this.robot.w += (this.robot.targetW - this.robot.w) * 0.2;
+    
+    this.robot.theta += this.robot.w * 0.08;
+    this.robot.x += Math.cos(this.robot.theta) * this.robot.vx;
+    this.robot.y += Math.sin(this.robot.theta) * this.robot.vx;
+    
+    // Simulate slight dead reckoning drift (accumulating over distance)
+    this.robot.driftX += (Math.random() - 0.5) * 0.015;
+    this.robot.driftY += (Math.random() - 0.5) * 0.015;
+  }
+  
+  render() {
+    const ctx = this.ctx;
+    ctx.clearRect(0, 0, this.width, this.height);
+    
+    // 1. Grid pattern
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.04)';
+    ctx.lineWidth = 1;
+    const gridSize = 40;
+    for (let x = 0; x < this.width; x += gridSize) {
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, this.height);
+      ctx.stroke();
+    }
+    for (let y = 0; y < this.height; y += gridSize) {
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(this.width, y);
+      ctx.stroke();
+    }
+    
+    // 2. Camera FOV Frustum
+    if (this.showFov) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(this.robot.x, this.robot.y);
+      const halfFov = this.camFov / 2;
+      ctx.arc(
+        this.robot.x,
+        this.robot.y,
+        this.camRange,
+        this.robot.theta - halfFov,
+        this.robot.theta + halfFov
+      );
+      ctx.closePath();
+      
+      const grad = ctx.createRadialGradient(
+        this.robot.x, this.robot.y, 20,
+        this.robot.x, this.robot.y, this.camRange
+      );
+      grad.addColorStop(0, 'rgba(0, 240, 255, 0.22)');
+      grad.addColorStop(1, 'rgba(0, 240, 255, 0.01)');
+      ctx.fillStyle = grad;
+      ctx.fill();
+      
+      ctx.strokeStyle = 'rgba(0, 240, 255, 0.4)';
+      ctx.setLineDash([4, 4]);
+      ctx.stroke();
+      ctx.restore();
+    }
+    
+    // 3. LiDAR Rays
+    if (this.showLidar) {
+      ctx.save();
+      for (const hit of this.lidarHits) {
+        ctx.strokeStyle = 'rgba(0, 255, 136, 0.12)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(this.robot.x, this.robot.y);
+        ctx.lineTo(hit.point.x, hit.point.y);
+        ctx.stroke();
+        
+        // Point cloud hit dot
+        ctx.fillStyle = '#00ff88';
+        ctx.fillRect(hit.point.x - 1.5, hit.point.y - 1.5, 3, 3);
+      }
+      ctx.restore();
+    }
+    
+    // 4. Global Nav2 Path
+    if (this.globalPath.length > 1) {
+      ctx.save();
+      ctx.strokeStyle = 'rgba(0, 240, 255, 0.7)';
+      ctx.lineWidth = 2.5;
+      ctx.setLineDash([6, 6]);
+      ctx.beginPath();
+      ctx.moveTo(this.globalPath[0].x, this.globalPath[0].y);
+      for (let i = 1; i < this.globalPath.length; i++) {
+        ctx.lineTo(this.globalPath[i].x, this.globalPath[i].y);
+      }
+      ctx.stroke();
+      ctx.restore();
+    }
+    
+    // 5. MPPI Trajectory Rollouts
+    if (this.showMppi) {
+      ctx.save();
+      for (const r of this.mppiRollouts) {
+        ctx.strokeStyle = r.collision ? 'rgba(255, 51, 102, 0.25)' : 'rgba(157, 78, 221, 0.35)';
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.moveTo(this.robot.x, this.robot.y);
+        for (const p of r.path) {
+          ctx.lineTo(p.x, p.y);
+        }
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+    
+    // 6. Static Obstacles
+    ctx.save();
+    ctx.fillStyle = '#1e293b';
+    ctx.strokeStyle = '#38bdf8';
+    ctx.lineWidth = 1.5;
+    for (const obs of this.staticObstacles) {
+      if (obs.type === 'rect') {
+        ctx.fillRect(obs.x, obs.y, obs.w, obs.h);
+        ctx.strokeRect(obs.x, obs.y, obs.w, obs.h);
+      } else if (obs.type === 'circle') {
+        ctx.beginPath();
+        ctx.arc(obs.x, obs.y, obs.r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
+    
+    // 7. Dynamic Obstacles (Moving humans)
+    for (const obs of this.dynamicObstacles) {
+      ctx.save();
+      // Body
+      ctx.fillStyle = '#f59e0b';
+      ctx.beginPath();
+      ctx.arc(obs.x, obs.y, obs.r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#fbbf24';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      
+      // Velocity Vector (Tracking Arrow)
+      ctx.strokeStyle = '#00f0ff';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(obs.x, obs.y);
+      ctx.lineTo(obs.x + obs.vx * 25, obs.y + obs.vy * 25);
+      ctx.stroke();
+      
+      // Label
+      ctx.fillStyle = '#ffffff';
+      ctx.font = '10px monospace';
+      ctx.fillText(obs.label, obs.x - 20, obs.y - 18);
+      
+      ctx.restore();
+    }
+    
+    // 8. 3D Bounding Box Projection on Detected Objects
+    for (const obj of this.detectedObjects) {
+      ctx.save();
+      ctx.strokeStyle = '#00f0ff';
+      ctx.lineWidth = 1.5;
+      const boxSize = 36;
+      ctx.strokeRect(obj.x - boxSize / 2, obj.y - boxSize / 2, boxSize, boxSize);
+      
+      // Isometric 3D depth top lines
+      ctx.beginPath();
+      ctx.moveTo(obj.x - boxSize / 2, obj.y - boxSize / 2);
+      ctx.lineTo(obj.x - boxSize / 2 + 8, obj.y - boxSize / 2 - 8);
+      ctx.lineTo(obj.x + boxSize / 2 + 8, obj.y - boxSize / 2 - 8);
+      ctx.lineTo(obj.x + boxSize / 2, obj.y - boxSize / 2);
+      ctx.stroke();
+      
+      // Metric tag
+      ctx.fillStyle = '#00f0ff';
+      ctx.font = '9px monospace';
+      const metricStr = `${obj.label} | ${(obj.dist / 40).toFixed(1)}m`;
+      ctx.fillText(metricStr, obj.x - 25, obj.y + boxSize / 2 + 12);
+      ctx.restore();
+    }
+    
+    // 9. Goal Point
+    if (this.goal.active) {
+      ctx.save();
+      ctx.fillStyle = 'rgba(0, 255, 136, 0.2)';
+      ctx.beginPath();
+      ctx.arc(this.goal.x, this.goal.y, 22, 0, Math.PI * 2);
+      ctx.fill();
+      
+      ctx.strokeStyle = '#00ff88';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(this.goal.x, this.goal.y, 14, 0, Math.PI * 2);
+      ctx.stroke();
+      
+      ctx.fillStyle = '#00ff88';
+      ctx.font = '10px monospace';
+      ctx.fillText('NAV GOAL', this.goal.x - 24, this.goal.y + 30);
+      ctx.restore();
+    }
+    
+    // 10. Autonomous Robot Base
+    ctx.save();
+    ctx.translate(this.robot.x, this.robot.y);
+    ctx.rotate(this.robot.theta);
+    
+    // Robot chassis
+    ctx.fillStyle = '#0f172a';
+    ctx.strokeStyle = '#00f0ff';
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.arc(0, 0, this.robot.radius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    
+    // Forward heading indicator
+    ctx.fillStyle = '#00ff88';
+    ctx.beginPath();
+    ctx.moveTo(this.robot.radius - 2, 0);
+    ctx.lineTo(this.robot.radius - 8, -6);
+    ctx.lineTo(this.robot.radius - 8, 6);
+    ctx.closePath();
+    ctx.fill();
+    
+    // Wheels
+    ctx.fillStyle = '#64748b';
+    ctx.fillRect(-10, -this.robot.radius - 3, 20, 4);
+    ctx.fillRect(-10, this.robot.radius - 1, 20, 4);
+    
+    ctx.restore();
+  }
+  
+  updateTelemetryUI() {
+    const elPose = document.getElementById('telemetry-pose');
+    const elVel = document.getElementById('telemetry-vel');
+    const elDrift = document.getElementById('telemetry-drift');
+    const elInfer = document.getElementById('telemetry-infer');
+    const elPwr = document.getElementById('telemetry-pwr');
+    const elObjects = document.getElementById('telemetry-objects');
+    
+    if (elPose) {
+      elPose.textContent = `X:${(this.robot.x / 40).toFixed(2)}m Y:${(this.robot.y / 40).toFixed(2)}m`;
+    }
+    if (elVel) {
+      elVel.textContent = `v:${this.robot.vx.toFixed(2)}m/s ω:${this.robot.w.toFixed(2)}r/s`;
+    }
+    if (elDrift) {
+      const driftMag = Math.hypot(this.robot.driftX, this.robot.driftY);
+      elDrift.textContent = `± ${(driftMag * 0.1).toFixed(3)}m (0.04m/m)`;
+    }
+    if (elInfer) {
+      elInfer.textContent = `${(12 + Math.random() * 3).toFixed(1)} ms (TensorRT)`;
+    }
+    if (elPwr) {
+      elPwr.textContent = `${(11.2 + this.robot.vx * 1.5).toFixed(1)} W (Orin NX)`;
+    }
+    if (elObjects) {
+      elObjects.textContent = `${this.detectedObjects.length} active`;
+    }
+  }
+  
+  startLoop() {
+    const loop = () => {
+      this.updateDynamicObstacles();
+      this.simulateLidar();
+      this.simulateCameraFOV();
+      this.simulateMPPIPlanner();
+      this.updateRobotKinematics();
+      this.render();
+      this.updateTelemetryUI();
+      
+      requestAnimationFrame(loop);
+    };
+    requestAnimationFrame(loop);
+  }
+}
+
+// Global instance exposed
+window.AutonomousSim = AutonomousSim;

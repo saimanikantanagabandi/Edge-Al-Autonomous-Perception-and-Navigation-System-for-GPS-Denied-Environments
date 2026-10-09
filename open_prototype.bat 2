@@ -1,0 +1,6 @@
+@echo off
+echo ========================================================
+echo  Launching AegisEdge Autonomous System Prototype...
+echo  Works 100%% Offline (Zero Dependencies Required)
+echo ========================================================
+start index.html

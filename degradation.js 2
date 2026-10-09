@@ -1,0 +1,145 @@
+/**
+ * Sensor Degradation & Adaptive Fusion Stress-Test Engine
+ * Demonstrates how the system dynamically mitigates GPS-denied sensor failure modes.
+ */
+
+class DegradationTestbed {
+  constructor() {
+    this.currentScenario = 'normal';
+    
+    // Sensor Health & Weight Metrics (0 to 100)
+    this.state = {
+      vioHealth: 98,
+      lidarHealth: 99,
+      imuHealth: 100,
+      vioWeight: 45,
+      lidarWeight: 45,
+      imuWeight: 10,
+      driftRate: 0.038, // meters per 10m traveled
+      degradationStatus: 'NOMINAL - FULL COVARIANCE FUSION'
+    };
+    
+    this.history = [];
+    this.maxHistory = 50;
+    
+    this.initUI();
+    this.startTelemetryLoop();
+  }
+  
+  setScenario(scenarioKey) {
+    this.currentScenario = scenarioKey;
+    
+    switch (scenarioKey) {
+      case 'normal':
+        this.state.vioHealth = 98;
+        this.state.lidarHealth = 99;
+        this.state.imuHealth = 100;
+        this.state.vioWeight = 45;
+        this.state.lidarWeight = 45;
+        this.state.imuWeight = 10;
+        this.state.driftRate = 0.038;
+        this.state.degradationStatus = 'NOMINAL: FULL TIGHTLY-COUPLED FUSION';
+        break;
+        
+      case 'darkness':
+        // Camera blinded (tunnels, sudden power outage, smoke)
+        this.state.vioHealth = 8;
+        this.state.lidarHealth = 98;
+        this.state.imuHealth = 100;
+        this.state.vioWeight = 4;
+        this.state.lidarWeight = 78;
+        this.state.imuWeight = 18;
+        this.state.driftRate = 0.052;
+        this.state.degradationStatus = 'VIO DEGRADED: PHOTOMETRIC LOSS DETECTED -> LiDAR-INERTIAL FALLBACK';
+        break;
+        
+      case 'corridor':
+        // Featureless straight tunnel (LiDAR degenerate along X-axis)
+        this.state.vioHealth = 96;
+        this.state.lidarHealth = 22;
+        this.state.imuHealth = 100;
+        this.state.vioWeight = 75;
+        this.state.lidarWeight = 10;
+        this.state.imuWeight = 15;
+        this.state.driftRate = 0.061;
+        this.state.degradationStatus = 'LiDAR DEGENERATE: LOW EIGENVALUE DETECTED -> VISUAL DOMINANCE';
+        break;
+        
+      case 'slip':
+        // Wheel slippage on wet mud or smooth tile
+        this.state.vioHealth = 94;
+        this.state.lidarHealth = 96;
+        this.state.imuHealth = 99;
+        this.state.vioWeight = 48;
+        this.state.lidarWeight = 48;
+        this.state.imuWeight = 4;
+        this.state.driftRate = 0.045;
+        this.state.degradationStatus = 'WHEEL SLIP REJECTED: ENCODER ZERO-WEIGHT CLAMP ACTIVE';
+        break;
+    }
+    
+    this.updateUI();
+  }
+  
+  updateUI() {
+    // Update scenario buttons/cards
+    document.querySelectorAll('.scenario-card').forEach(card => {
+      card.classList.toggle('active', card.dataset.scenario === this.currentScenario);
+    });
+    
+    // Update meters
+    const vioBar = document.getElementById('meter-vio-fill');
+    const vioVal = document.getElementById('meter-vio-val');
+    const lidarBar = document.getElementById('meter-lidar-fill');
+    const lidarVal = document.getElementById('meter-lidar-val');
+    const imuBar = document.getElementById('meter-imu-fill');
+    const imuVal = document.getElementById('meter-imu-val');
+    
+    const statusText = document.getElementById('degradation-status-banner');
+    const driftText = document.getElementById('degradation-drift-metric');
+    
+    if (vioBar) vioBar.style.width = `${this.state.vioHealth}%`;
+    if (vioVal) vioVal.textContent = `${this.state.vioHealth}% (Weight: ${this.state.vioWeight}%)`;
+    if (vioBar) {
+      vioBar.style.backgroundColor = this.state.vioHealth > 50 ? 'var(--accent-cyan)' : 'var(--accent-red)';
+    }
+    
+    if (lidarBar) lidarBar.style.width = `${this.state.lidarHealth}%`;
+    if (lidarVal) lidarVal.textContent = `${this.state.lidarHealth}% (Weight: ${this.state.lidarWeight}%)`;
+    if (lidarBar) {
+      lidarBar.style.backgroundColor = this.state.lidarHealth > 50 ? 'var(--accent-green)' : 'var(--accent-red)';
+    }
+    
+    if (imuBar) imuBar.style.width = `${this.state.imuHealth}%`;
+    if (imuVal) imuVal.textContent = `${this.state.imuHealth}% (Weight: ${this.state.imuWeight}%)`;
+    
+    if (statusText) statusText.textContent = this.state.degradationStatus;
+    if (driftText) driftText.textContent = `${this.state.driftRate.toFixed(3)} m / 10m`;
+  }
+  
+  initUI() {
+    document.querySelectorAll('.scenario-card').forEach(card => {
+      card.addEventListener('click', () => {
+        this.setScenario(card.dataset.scenario);
+      });
+    });
+  }
+  
+  startTelemetryLoop() {
+    setInterval(() => {
+      // Small sensor jitter simulation
+      const jitter = (Math.random() - 0.5) * 1.5;
+      this.history.push({
+        vio: Math.max(0, Math.min(100, this.state.vioWeight + jitter)),
+        lidar: Math.max(0, Math.min(100, this.state.lidarWeight - jitter)),
+        drift: this.state.driftRate + (Math.random() - 0.5) * 0.005
+      });
+      
+      if (this.history.length > this.maxHistory) {
+        this.history.shift();
+      }
+    }, 200);
+  }
+}
+
+window.DegradationTestbed = DegradationTestbed;
